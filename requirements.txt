@@ -15,6 +15,10 @@ pydantic>=2.7.0
 # --- LLM ---
 openai>=1.30.0             # OpenAI Python SDK — structured outputs, streaming
 
+# --- Market data (portfolio health agent) ---
+yfinance>=0.2.40           # Live prices, FX rates, benchmark returns — see README for justification
+pandas>=2.2.0              # Required by yfinance for data processing
+
 # --- Utilities ---
 python-dotenv>=1.0.0
 
