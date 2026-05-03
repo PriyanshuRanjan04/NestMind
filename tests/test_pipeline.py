@@ -164,11 +164,19 @@ async def test_safety_blocked_query_returns_sse():
 @pytest.mark.asyncio
 async def test_clean_query_pipeline_flow():
     """A clean query must produce metadata → token(s) → done."""
+    stub_payload = json.dumps({
+        "status": "not_implemented",
+        "classified_intent": "test intent",
+        "target_agent": "general_query",
+        "extracted_entities": {},
+        "message": "The General Query agent is not yet available in this build.",
+        "user_facing_message": "I'm here to help — this type of query will be fully supported soon.",
+    })
     with (
         patch("src.pipeline.classify", return_value=_make_classifier_result("general_query")),
         patch(
             "src.agents.stub.run",
-            return_value=_async_gen(['{"status": "not_implemented"}']),
+            return_value=_async_gen([stub_payload]),
         ),
     ):
         async with AsyncClient(
@@ -371,6 +379,206 @@ class TestMatchers:
         passed, failures = entity_subset_match({"tickers": ["AAPL"]}, {})
         assert not passed
         assert any("tickers" in f for f in failures)
+
+
+# ---------------------------------------------------------------------------
+# Stub agent unit tests
+# ---------------------------------------------------------------------------
+
+class TestStubAgent:
+    """Unit tests for src/agents/stub.py — no pipeline, tests the module directly."""
+
+    @staticmethod
+    def _make_result(
+        agent: str = "market_research",
+        intent: str = "research AAPL",
+        tickers: list[str] | None = None,
+        topics: list[str] | None = None,
+    ) -> ClassifierResult:
+        entities = ClassifierEntities(
+            tickers=tickers,
+            topics=topics,
+        )
+        return ClassifierResult(
+            intent=intent,
+            agent=AgentName(agent),
+            entities=entities,
+            safety_verdict=SafetyVerdict(flag=SafetyFlag.clean),
+            confidence=0.9,
+        )
+
+    @staticmethod
+    async def _collect(gen) -> str:
+        """Drain the async generator and return joined output."""
+        chunks = []
+        async for chunk in gen:
+            chunks.append(chunk)
+        return "".join(chunks)
+
+    @pytest.mark.asyncio
+    async def test_spec_fields_all_present(self):
+        """All 6 spec-required fields must be present in the output JSON."""
+        from src.agents.stub import run
+        from src.schemas import UserProfile, KYC
+
+        user = UserProfile(
+            user_id="u1", name="Test", age=30, country="US",
+            base_currency="USD", kyc=KYC(status="verified"),
+            risk_profile="moderate",
+        )
+        result = self._make_result("market_research", "research AAPL", tickers=["AAPL"])
+        raw = await self._collect(run(user, result, "market_research"))
+        payload = json.loads(raw)
+
+        assert payload["status"] == "not_implemented"
+        assert "classified_intent" in payload
+        assert "target_agent" in payload
+        assert "extracted_entities" in payload
+        assert "message" in payload
+        assert "user_facing_message" in payload
+
+    @pytest.mark.asyncio
+    async def test_classified_intent_and_target_agent(self):
+        """classified_intent and target_agent must match the classifier result."""
+        from src.agents.stub import run
+        from src.schemas import UserProfile, KYC
+
+        user = UserProfile(
+            user_id="u1", name="Test", age=30, country="US",
+            base_currency="USD", kyc=KYC(status="verified"),
+            risk_profile="moderate",
+        )
+        result = self._make_result("investment_strategy", "should I rebalance?",)
+        raw = await self._collect(run(user, result, "investment_strategy"))
+        payload = json.loads(raw)
+
+        assert payload["classified_intent"] == "should I rebalance?"
+        assert payload["target_agent"] == "investment_strategy"
+
+    @pytest.mark.asyncio
+    async def test_message_contains_human_readable_name(self):
+        """The message field must use the human-readable agent name."""
+        from src.agents.stub import run
+        from src.schemas import UserProfile, KYC
+
+        user = UserProfile(
+            user_id="u1", name="Test", age=30, country="US",
+            base_currency="USD", kyc=KYC(status="verified"),
+            risk_profile="moderate",
+        )
+        cases = [
+            ("market_research",       "Market Research"),
+            ("investment_strategy",   "Investment Strategy"),
+            ("financial_calculator",  "Financial Calculator"),
+            ("financial_planning",    "Financial Planning"),
+            ("risk_assessment",       "Risk Assessment"),
+            ("customer_support",      "Customer Support"),
+            ("general_query",         "General Query"),
+        ]
+        for agent_slug, expected_human in cases:
+            result = self._make_result(agent_slug, "test query")
+            raw = await self._collect(run(user, result, agent_slug))
+            payload = json.loads(raw)
+            assert expected_human in payload["message"], (
+                f"Expected human name {expected_human!r} not in message for {agent_slug!r}:\n"
+                f"  {payload['message']!r}"
+            )
+            assert "not yet available" in payload["message"]
+
+    @pytest.mark.asyncio
+    async def test_user_facing_message_per_agent(self):
+        """Each agent must return its spec-defined user_facing_message snippet."""
+        from src.agents.stub import run
+        from src.schemas import UserProfile, KYC
+
+        user = UserProfile(
+            user_id="u1", name="Test", age=30, country="US",
+            base_currency="USD", kyc=KYC(status="verified"),
+            risk_profile="moderate",
+        )
+        cases = [
+            ("investment_strategy",   "on the way"),
+            ("financial_calculator",  "not yet live"),
+            ("financial_planning",    "coming soon"),
+            ("risk_assessment",       "in development"),
+            ("product_recommendation", "not yet available"),
+            ("predictive_analysis",   "future release"),
+            ("customer_support",      "support@nestmind.ai"),
+            ("general_query",         "fully supported soon"),
+        ]
+        for agent_slug, expected_snippet in cases:
+            result = self._make_result(agent_slug, "test")
+            raw = await self._collect(run(user, result, agent_slug))
+            payload = json.loads(raw)
+            assert expected_snippet.lower() in payload["user_facing_message"].lower(), (
+                f"user_facing_message for {agent_slug!r} missing {expected_snippet!r}:\n"
+                f"  {payload['user_facing_message']!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_market_research_interpolates_ticker(self):
+        """market_research user_facing_message must include the ticker when present."""
+        from src.agents.stub import run
+        from src.schemas import UserProfile, KYC
+
+        user = UserProfile(
+            user_id="u1", name="Test", age=30, country="US",
+            base_currency="USD", kyc=KYC(status="verified"),
+            risk_profile="moderate",
+        )
+        result = self._make_result("market_research", "research TSLA", tickers=["TSLA"])
+        raw = await self._collect(run(user, result, "market_research"))
+        payload = json.loads(raw)
+        assert "TSLA" in payload["user_facing_message"]
+
+    @pytest.mark.asyncio
+    async def test_market_research_interpolates_topic_when_no_ticker(self):
+        """market_research user_facing_message uses topic if no ticker is present."""
+        from src.agents.stub import run
+        from src.schemas import UserProfile, KYC
+
+        user = UserProfile(
+            user_id="u1", name="Test", age=30, country="US",
+            base_currency="USD", kyc=KYC(status="verified"),
+            risk_profile="moderate",
+        )
+        result = self._make_result("market_research", "research semiconductors", topics=["semiconductors"])
+        raw = await self._collect(run(user, result, "market_research"))
+        payload = json.loads(raw)
+        assert "semiconductors" in payload["user_facing_message"]
+
+    @pytest.mark.asyncio
+    async def test_output_is_valid_json(self):
+        """The stub must yield exactly one chunk that is valid JSON."""
+        from src.agents.stub import run
+        from src.schemas import UserProfile, KYC
+
+        user = UserProfile(
+            user_id="u1", name="Test", age=30, country="US",
+            base_currency="USD", kyc=KYC(status="verified"),
+            risk_profile="moderate",
+        )
+        result = self._make_result("financial_planning", "plan my retirement")
+        raw = await self._collect(run(user, result, "financial_planning"))
+        # Must parse without error
+        parsed = json.loads(raw)
+        assert isinstance(parsed, dict)
+
+    @pytest.mark.asyncio
+    async def test_no_crash_on_empty_entities(self):
+        """Stub must not crash when extracted_entities is empty."""
+        from src.agents.stub import run
+        from src.schemas import UserProfile, KYC
+
+        user = UserProfile(
+            user_id="u1", name="Test", age=30, country="US",
+            base_currency="USD", kyc=KYC(status="verified"),
+            risk_profile="moderate",
+        )
+        result = self._make_result("general_query", "hello")
+        raw = await self._collect(run(user, result, "general_query"))
+        payload = json.loads(raw)
+        assert payload["extracted_entities"] == {}
 
 
 # ---------------------------------------------------------------------------

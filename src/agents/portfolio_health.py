@@ -361,7 +361,19 @@ async def run(
     payload = await loop.run_in_executor(None, _build_payload, user)
 
     # Step 2: LLM call → structured health report
-    report = await _call_llm(payload)
+    # Outer try/except: catches the case where _call_llm itself raises
+    # (e.g. initialisation error, mock side_effect in tests, import failure).
+    # The inner try/except inside _call_llm handles OpenAI SDK errors.
+    # Both layers are intentional defence-in-depth — do not remove either.
+    try:
+        report = await _call_llm(payload)
+    except Exception as exc:
+        logger.error(
+            "portfolio_health: _call_llm raised unexpectedly for user %s: %s",
+            user.user_id,
+            exc,
+        )
+        report = _fallback_report(payload)
 
     # Store for pipeline to access
     run._last_report = report
