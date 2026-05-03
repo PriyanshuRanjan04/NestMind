@@ -26,7 +26,10 @@ from src.safety.guard import check as safety_check
 from src.schemas import (
     AgentName,
     ChatRequest,
+    ClassifierEntities,
     ClassifierResult,
+    SafetyFlag,
+    SafetyVerdict,
     SSEEventType,
     UserProfile,
 )
@@ -124,9 +127,11 @@ async def run_pipeline(request: ChatRequest) -> AsyncIterator[str]:
     # ------------------------------------------------------------------
     # Step 3 — Intent classification (one LLM call)
     # ------------------------------------------------------------------
-    # classify() is guaranteed not to raise — it returns a fallback
-    # ClassifierResult with fallback=True on any internal error.
-    # The only thing that can abort here is a pipeline-level timeout.
+    # Two-layer protection:
+    #   Inner layer: classify()'s own try/except catches OpenAI SDK errors.
+    #   Outer layer: catches the case where classify itself raises
+    #     (e.g. when patched in tests via side_effect, import failure, etc.).
+    # Both layers are intentional — do not remove either.
     try:
         async with asyncio.timeout(config.PIPELINE_TIMEOUT_S):
             classifier_result: ClassifierResult = await classify(
@@ -144,6 +149,27 @@ async def run_pipeline(request: ChatRequest) -> AsyncIterator[str]:
         )
         yield _sse_done()
         return
+    except Exception as exc:
+        # classify() raised unexpectedly (e.g. mock side_effect in tests,
+        # or an unforeseen initialisation error). Build a valid fallback
+        # result and continue — the pipeline will stream the graceful
+        # user message via the fallback path below (step 4b).
+        logger.error(
+            "classify() raised unexpectedly | session=%s | query=%r | error=%s",
+            session_id,
+            query,
+            exc,
+        )
+        classifier_result = ClassifierResult(
+            intent="classification_unavailable",
+            agent=AgentName.general_query,
+            entities=ClassifierEntities(),
+            safety_verdict=SafetyVerdict(flag=SafetyFlag.clean, note=""),
+            confidence=0.0,
+            context_used=False,
+            fallback=True,
+            fallback_reason=f"classify_raised: {exc}",
+        )
 
     # ------------------------------------------------------------------
     # Step 4 — Emit metadata SSE event (routing decision)
