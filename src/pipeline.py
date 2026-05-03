@@ -124,28 +124,31 @@ async def run_pipeline(request: ChatRequest) -> AsyncIterator[str]:
     # ------------------------------------------------------------------
     # Step 3 — Intent classification (one LLM call)
     # ------------------------------------------------------------------
+    # classify() is guaranteed not to raise — it returns a fallback
+    # ClassifierResult with fallback=True on any internal error.
+    # The only thing that can abort here is a pipeline-level timeout.
     try:
         async with asyncio.timeout(config.PIPELINE_TIMEOUT_S):
             classifier_result: ClassifierResult = await classify(
                 query, history
             )
     except asyncio.TimeoutError:
+        logger.warning(
+            "Classifier timed out | session=%s | query=%r",
+            session_id,
+            query,
+        )
         yield _sse_error(
             "Request timed out during classification. Please try again.",
             code="TIMEOUT",
         )
         yield _sse_done()
         return
-    except Exception as exc:
-        logger.exception("Classifier raised unexpectedly: %s", exc)
-        yield _sse_error("An unexpected error occurred. Please try again.")
-        yield _sse_done()
-        return
 
     # ------------------------------------------------------------------
     # Step 4 — Emit metadata SSE event (routing decision)
     # ------------------------------------------------------------------
-    metadata_payload = {
+    metadata_payload: dict = {
         "intent": classifier_result.intent,
         "agent": classifier_result.agent.value,
         "entities": classifier_result.entities.to_dict(),
@@ -157,7 +160,30 @@ async def run_pipeline(request: ChatRequest) -> AsyncIterator[str]:
             "note": classifier_result.safety_verdict.note,
         },
     }
+    # Include fallback fields when the classifier degraded gracefully
+    if classifier_result.fallback:
+        metadata_payload["fallback"] = True
+        metadata_payload["fallback_reason"] = classifier_result.fallback_reason
+        logger.warning(
+            "Classifier fallback | reason=%s | session=%s | query=%r",
+            classifier_result.fallback_reason,
+            session_id,
+            query,
+        )
     yield _sse_metadata(metadata_payload)
+
+    # ------------------------------------------------------------------
+    # Step 4b — If classification fell back, stream the spec-mandated
+    # user message and stop — do NOT dispatch to an agent.
+    # The safety guard is the ONLY thing that can stop a query otherwise.
+    # ------------------------------------------------------------------
+    if classifier_result.fallback:
+        yield _sse_token(
+            "I'm having trouble processing your request right now. "
+            "Please try again in a moment."
+        )
+        yield _sse_done()
+        return
 
     # ------------------------------------------------------------------
     # Step 5 — Append turn to session memory AFTER classification

@@ -164,9 +164,12 @@ class TestClassify:
             side_effect=APIError("Mocked API error", request=None, body=None)
         )
         result = await classify("some query", client=mock_client)
-        # Should not raise; should return safe fallback
+        # Spec: must not raise, agent=general_query, confidence=0.0, fallback=True
         assert result.agent == AgentName.general_query
-        assert result.confidence < 0.5
+        assert result.confidence == 0.0
+        assert result.fallback is True
+        assert result.fallback_reason in ("api_error", "rate_limit")
+        assert result.intent == "classification_unavailable"
 
     @pytest.mark.asyncio
     async def test_fallback_on_json_decode_error(self):
@@ -176,6 +179,9 @@ class TestClassify:
         )
         result = await classify("some query", client=mock_client)
         assert result.agent == AgentName.general_query
+        assert result.fallback is True
+        assert result.fallback_reason == "parse_error"
+        assert result.confidence == 0.0
 
     @pytest.mark.asyncio
     async def test_history_trimmed_to_max(self):
@@ -192,6 +198,61 @@ class TestClassify:
         # Only last 6 turns should appear
         assert "turn 19" in user_msg
         assert "turn 0" not in user_msg
+
+
+# ---------------------------------------------------------------------------
+# Classifier fallback spec tests
+# ---------------------------------------------------------------------------
+
+class TestClassifierFallbackSpec:
+    """
+    Validates that _fallback_result() returns the exact schema from the spec
+    and that classify() sets the correct fallback_reason per error type.
+    """
+
+    def test_fallback_result_spec_fields(self):
+        """_fallback_result() must return the exact spec-mandated structure."""
+        result = _fallback_result("api_error")
+        assert result.intent == "classification_unavailable"
+        assert result.agent == AgentName.general_query
+        assert result.entities.to_dict() == {}
+        assert result.safety_verdict.flag.value == "clean"
+        assert result.safety_verdict.note == ""
+        assert result.confidence == 0.0
+        assert result.context_used is False
+        assert result.fallback is True
+        assert result.fallback_reason == "api_error"
+
+    def test_fallback_reason_timeout(self):
+        result = _fallback_result("timeout")
+        assert result.fallback_reason == "timeout"
+
+    def test_fallback_reason_parse_error(self):
+        result = _fallback_result("parse_error")
+        assert result.fallback_reason == "parse_error"
+
+    def test_fallback_reason_rate_limit(self):
+        result = _fallback_result("rate_limit")
+        assert result.fallback_reason == "rate_limit"
+
+    def test_normal_result_has_fallback_false(self):
+        """A successful classification must NOT set fallback=True."""
+        data = json.loads(_classifier_json("market_research", entities={"tickers": ["AAPL"]}))
+        result = _parse_result(data)
+        assert result.fallback is False
+        assert result.fallback_reason == ""
+
+    @pytest.mark.asyncio
+    async def test_general_exception_gives_api_error_reason(self):
+        """Any non-API, non-JSON exception maps to api_error fallback_reason."""
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=RuntimeError("network down")
+        )
+        result = await classify("test", client=mock_client)
+        assert result.fallback is True
+        assert result.fallback_reason == "api_error"
+        assert result.confidence == 0.0
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ Design decisions
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Optional
@@ -216,9 +217,36 @@ async def classify(
         data = json.loads(raw)
         return _parse_result(data)
 
-    except (APIError, json.JSONDecodeError, Exception) as exc:
-        logger.warning("Classifier error — falling back to general_query: %s", exc)
-        return _fallback_result(query)
+    except asyncio.TimeoutError as exc:
+        logger.warning(
+            "Classifier timeout — falling back to general_query | query=%r",
+            query,
+        )
+        return _fallback_result("timeout")
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "Classifier returned malformed JSON — falling back | error=%s | query=%r",
+            exc,
+            query,
+        )
+        return _fallback_result("parse_error")
+    except APIError as exc:
+        # RateLimitError is a subclass of APIError — check status code
+        reason = "rate_limit" if getattr(exc, "status_code", None) == 429 else "api_error"
+        logger.warning(
+            "Classifier API error — falling back | reason=%s | status=%s | query=%r",
+            reason,
+            getattr(exc, "status_code", "?"),
+            query,
+        )
+        return _fallback_result(reason)
+    except Exception as exc:
+        logger.warning(
+            "Classifier unexpected error — falling back | error=%s | query=%r",
+            exc,
+            query,
+        )
+        return _fallback_result("api_error")
 
 
 def _parse_result(data: dict) -> ClassifierResult:
@@ -274,16 +302,30 @@ def _parse_result(data: dict) -> ClassifierResult:
 
     except Exception as exc:
         logger.warning("Failed to parse classifier result: %s — data: %s", exc, data)
-        return _fallback_result(str(data.get("intent", "parse error")))
+        return _fallback_result("parse_error")
 
 
-def _fallback_result(query_or_note: str) -> ClassifierResult:
-    """Safe fallback when classification fails completely."""
+def _fallback_result(reason: str = "api_error") -> ClassifierResult:
+    """
+    Safe fallback when classification fails for any reason.
+
+    Returns the exact schema mandated by the spec:
+      intent        = "classification_unavailable"
+      agent         = general_query
+      entities      = {}
+      safety_verdict = {flag: clean, note: ""}
+      confidence    = 0.0
+      context_used  = false
+      fallback      = true
+      fallback_reason = reason  (timeout | api_error | parse_error | rate_limit)
+    """
     return ClassifierResult(
-        intent=f"classification failed — treating as general query",
+        intent="classification_unavailable",
         agent=AgentName.general_query,
         entities=ClassifierEntities(),
         safety_verdict=SafetyVerdict(flag=SafetyFlag.clean, note=""),
-        confidence=0.3,
+        confidence=0.0,
         context_used=False,
+        fallback=True,
+        fallback_reason=reason,
     )

@@ -81,6 +81,9 @@ class ClassifierResult(BaseModel):
     safety_verdict: SafetyVerdict = Field(default_factory=SafetyVerdict)
     confidence: float = Field(ge=0.0, le=1.0)
     context_used: bool = False
+    # Set by the classifier when it falls back due to LLM failure
+    fallback: bool = False
+    fallback_reason: str = ""  # timeout | api_error | parse_error | rate_limit | ""
 
 
 # ---------------------------------------------------------------------------
