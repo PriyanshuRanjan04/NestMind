@@ -35,7 +35,7 @@ from typing import Optional
 
 from openai import AsyncOpenAI, APIError
 
-from src.config import OPENAI_API_KEY, OPENAI_MODEL
+from src.config import OPENAI_API_KEY, OPENAI_MODEL, GROQ_API_KEY, USE_GROQ
 from src.schemas import (
     AgentName,
     ClassifierEntities,
@@ -45,6 +45,26 @@ from src.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Client / model selection
+# USE_GROQ=false (default) → always OpenAI. Groq import is lazy so it is
+# never loaded when USE_GROQ is false.
+# ---------------------------------------------------------------------------
+
+def _get_client():
+    """Return the appropriate async LLM client based on config."""
+    if USE_GROQ:
+        from groq import AsyncGroq  # noqa: PLC0415 — intentional lazy import
+        return AsyncGroq(api_key=GROQ_API_KEY)
+    return AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+
+def _get_model() -> str:
+    """Return the model name for the active backend."""
+    if USE_GROQ:
+        return "llama-3.1-70b-versatile"
+    return OPENAI_MODEL
 
 # Max prior user turns to include in context.
 # 6 covers the deepest conversation fixture (4 turns) with headroom.
@@ -197,13 +217,14 @@ async def classify(
     Does NOT raise — on any failure returns a safe fallback result.
     """
     if client is None:
-        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        client = _get_client()
 
+    model = _get_model()
     user_message = _build_user_message(query, history)
 
     try:
         response = await client.chat.completions.create(
-            model=OPENAI_MODEL,
+            model=model,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": user_message},

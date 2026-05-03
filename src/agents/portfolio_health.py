@@ -17,10 +17,31 @@ from typing import AsyncIterator, Optional
 
 import yfinance as yf
 
-from src.config import OPENAI_API_KEY, OPENAI_MODEL
+from src.config import OPENAI_API_KEY, OPENAI_MODEL, GROQ_API_KEY, USE_GROQ
 from src.schemas import ClassifierResult, UserProfile
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Client / model selection
+# USE_GROQ=false (default) → always OpenAI. Groq import is lazy so it is
+# never loaded when USE_GROQ is false.
+# ---------------------------------------------------------------------------
+
+def _get_client():
+    """Return the appropriate async LLM client based on config."""
+    if USE_GROQ:
+        from groq import AsyncGroq  # noqa: PLC0415 — intentional lazy import
+        return AsyncGroq(api_key=GROQ_API_KEY)
+    from openai import AsyncOpenAI
+    return AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+
+def _get_model() -> str:
+    """Return the model name for the active backend."""
+    if USE_GROQ:
+        return "llama-3.1-70b-versatile"
+    return OPENAI_MODEL
 
 # ---------------------------------------------------------------------------
 # System prompt (verbatim from product spec)
@@ -285,15 +306,16 @@ def _build_payload(user: UserProfile) -> dict:
 
 async def _call_llm(payload: dict) -> dict:
     """
-    Call OpenAI with the new system prompt.
+    Call the configured LLM with the portfolio health system prompt.
     Returns the parsed structured health report dict.
+    Uses OpenAI by default; falls back to Groq when USE_GROQ=true.
     """
-    from openai import AsyncOpenAI
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    client = _get_client()
+    model = _get_model()
 
     try:
         response = await client.chat.completions.create(
-            model=OPENAI_MODEL,
+            model=model,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": json.dumps(payload)},

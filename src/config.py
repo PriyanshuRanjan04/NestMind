@@ -18,3 +18,11 @@ PIPELINE_TIMEOUT_S: float = float(os.getenv("PIPELINE_TIMEOUT_S", "25"))
 # Classifier retry budget — one retry on transient OpenAI errors before we
 # fall back to a safe default.
 CLASSIFIER_MAX_RETRIES: int = int(os.getenv("CLASSIFIER_MAX_RETRIES", "1"))
+
+# ---------------------------------------------------------------------------
+# Groq — optional local development fallback only.
+# USE_GROQ defaults to false. Evaluators always use OpenAI.
+# ---------------------------------------------------------------------------
+GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+# Accept "true" / "True" / "1" — anything else (including unset) is False.
+USE_GROQ: bool = os.getenv("USE_GROQ", "false").strip().lower() in ("true", "1")

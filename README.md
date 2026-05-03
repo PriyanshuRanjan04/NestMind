@@ -45,6 +45,38 @@ CI runs `pytest tests/ -v` without `OPENAI_API_KEY` — all LLM calls are mocked
 
 ---
 
+## Local Development with Groq (Free)
+
+OpenAI API calls cost money during development. You can run NestMind locally at zero cost using **Groq**, which provides a free API tier with generous rate limits and an OpenAI-compatible SDK.
+
+**This is opt-in and local-only. Evaluators use their own `OPENAI_API_KEY` with `USE_GROQ=false` (the default).**
+
+### Setup
+
+1. Get a free key at **[console.groq.com](https://console.groq.com)** — no credit card required.
+2. Add to your `.env`:
+   ```
+   GROQ_API_KEY=gsk_...
+   USE_GROQ=true
+   ```
+3. Run normally — the classifier and portfolio health agent automatically switch to Groq:
+   ```bash
+   python -m src.main
+   ```
+
+### How it works
+
+| Setting | Client used | Model |
+|---|---|---|
+| `USE_GROQ=false` (default) | `AsyncOpenAI` | `OPENAI_MODEL` (e.g. `gpt-4o-mini`) |
+| `USE_GROQ=true` | `AsyncGroq` | `llama-3.1-70b-versatile` |
+
+The Groq SDK is API-compatible with the OpenAI SDK — identical call shape, identical response shape. No prompts, parsing logic, or business logic changes between backends.
+
+The Groq import is **lazy** (only executed when `USE_GROQ=true`), so there is zero overhead when running in production with `USE_GROQ=false`.
+
+---
+
 ## Architecture
 
 ```

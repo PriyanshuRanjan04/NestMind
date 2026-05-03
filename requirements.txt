@@ -14,6 +14,7 @@ pydantic>=2.7.0
 
 # --- LLM ---
 openai>=1.30.0             # OpenAI Python SDK — structured outputs, streaming
+groq>=0.9.0                # Groq SDK — optional, local dev only (USE_GROQ=true). Never used by evaluator.
 
 # --- Market data (portfolio health agent) ---
 yfinance>=0.2.40           # Live prices, FX rates, benchmark returns — see README for justification
